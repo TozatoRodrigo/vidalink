@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, TextInput, Alert, SafeAreaView, Modal, Picker } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, TextInput, Alert, SafeAreaView, Modal, Picker, Image } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import QRCode from 'react-native-qrcode-svg';
+import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
 
 export default function App() {
   const [healthEvents, setHealthEvents] = useState([]);
@@ -18,6 +20,10 @@ export default function App() {
   // Estados para navegação
   const [currentScreen, setCurrentScreen] = useState('dashboard');
   const [selectedEvent, setSelectedEvent] = useState(null);
+
+  // Estados para upload de documentos
+  const [attachedDocuments, setAttachedDocuments] = useState([]);
+  const [showDocumentModal, setShowDocumentModal] = useState(false);
 
   // Estados do formulário
   const [formData, setFormData] = useState({
@@ -102,6 +108,121 @@ export default function App() {
     });
     setEditingEvent(null);
     setIsEditing(false);
+    setAttachedDocuments([]);
+  };
+
+  // Funções para upload de documentos
+  const pickImage = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      
+      if (status !== 'granted') {
+        Alert.alert('Permissão necessária', 'Precisamos de permissão para acessar suas fotos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsMultipleSelection: true,
+        quality: 0.8,
+        exif: false,
+      });
+
+      if (!result.canceled && result.assets) {
+        const newDocuments = result.assets.map((asset, index) => ({
+          id: Date.now() + index,
+          uri: asset.uri,
+          name: asset.fileName || `imagem_${Date.now()}_${index}.jpg`,
+          type: 'image',
+          mimeType: asset.type || 'image/jpeg',
+          size: asset.fileSize,
+        }));
+        setAttachedDocuments(prev => [...prev, ...newDocuments]);
+      }
+    } catch (error) {
+      console.error('Erro ao selecionar imagem:', error);
+      Alert.alert('Erro', 'Falha ao selecionar imagem');
+    }
+  };
+
+  const takePhoto = async () => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      
+      if (status !== 'granted') {
+        Alert.alert('Permissão necessária', 'Precisamos de permissão para usar a câmera.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.8,
+        exif: false,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        const asset = result.assets[0];
+        const newDocument = {
+          id: Date.now(),
+          uri: asset.uri,
+          name: asset.fileName || `foto_${Date.now()}.jpg`,
+          type: 'image',
+          mimeType: asset.type || 'image/jpeg',
+          size: asset.fileSize,
+        };
+        setAttachedDocuments(prev => [...prev, newDocument]);
+      }
+    } catch (error) {
+      console.error('Erro ao tirar foto:', error);
+      Alert.alert('Erro', 'Falha ao tirar foto');
+    }
+  };
+
+  const pickDocument = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'],
+        multiple: true,
+      });
+
+      if (!result.canceled && result.assets) {
+        const newDocuments = result.assets.map(asset => ({
+          id: Date.now() + Math.random(),
+          uri: asset.uri,
+          name: asset.name,
+          type: 'document',
+          mimeType: asset.mimeType || 'application/octet-stream',
+          size: asset.size,
+        }));
+        setAttachedDocuments(prev => [...prev, ...newDocuments]);
+      }
+    } catch (error) {
+      console.error('Erro ao selecionar documento:', error);
+      Alert.alert('Erro', 'Falha ao selecionar documento');
+    }
+  };
+
+  const removeDocument = (documentId) => {
+    setAttachedDocuments(prev => prev.filter(doc => doc.id !== documentId));
+  };
+
+  const showDocumentPicker = () => {
+    Alert.alert(
+      'Anexar Documento',
+      'Escolha uma opção:',
+      [
+        { text: 'Câmera', onPress: takePhoto },
+        { text: 'Galeria', onPress: pickImage },
+        { text: 'Documentos', onPress: pickDocument },
+        { text: 'Cancelar', style: 'cancel' },
+      ]
+    );
+  };
+
+  const formatFileSize = (size) => {
+    if (!size) return '';
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   // Iniciar edição de evento

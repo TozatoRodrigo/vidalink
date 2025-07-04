@@ -15,6 +15,7 @@ import { userRoutes } from './routes/users';
 import { healthEventRoutes } from './routes/healthEvents';
 import { qrShareRoutes } from './routes/qrShare';
 import { medicalAccessRoutes } from './routes/medicalAccess';
+import documentRoutes from './routes/documents';
 
 // Carrega variáveis de ambiente
 dotenv.config();
@@ -75,6 +76,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/health-events', healthEventRoutes);
 app.use('/api/qr-share', qrShareRoutes);
 app.use('/api/medical-access', medicalAccessRoutes);
+app.use('/api/documents', documentRoutes);
 
 // ============================================================================
 // MIDDLEWARE DE ERRO

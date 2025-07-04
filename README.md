@@ -199,10 +199,11 @@ Entre em contato: [seu-email@exemplo.com](mailto:seu-email@exemplo.com)
 
 - ✅ **Core Features**: Implementadas
 - ✅ **Mobile App**: Funcional completo
-- ✅ **Web Interface**: Scanner médico
-- ✅ **Backend API**: Endpoints principais
-- ✅ **Database**: Schema otimizado
-- 🔄 **Testes**: Em desenvolvimento
+- ✅ **Web Interface**: Timeline do paciente com upload
+- ✅ **Backend API**: Endpoints principais + documentos
+- ✅ **Database**: Schema otimizado + document_uploads
+- ✅ **Upload de Documentos**: Mobile + Web implementados
+- ✅ **Testes**: Suíte de testes automatizados
 - 🔄 **Deploy**: Preparação para produção
 
 ## 🤝 Contribuição
