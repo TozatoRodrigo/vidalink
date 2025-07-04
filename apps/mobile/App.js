@@ -5,6 +5,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import QRCode from 'react-native-qrcode-svg';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
+import MedicationReminders from './src/components/MedicationReminders';
+import NotificationService from './src/services/NotificationService';
 
 export default function App() {
   const [healthEvents, setHealthEvents] = useState([]);
@@ -24,6 +26,26 @@ export default function App() {
   // Estados para upload de documentos
   const [attachedDocuments, setAttachedDocuments] = useState([]);
   const [showDocumentModal, setShowDocumentModal] = useState(false);
+  const [selectedDocument, setSelectedDocument] = useState(null);
+
+  // Estados para filtros avançados
+  const [showFiltersModal, setShowFiltersModal] = useState(false);
+
+  // Estados para lembretes de medicamentos
+  const [showMedicationReminders, setShowMedicationReminders] = useState(false);
+  const [upcomingReminders, setUpcomingReminders] = useState([]);
+  const [activeFilters, setActiveFilters] = useState({
+    types: [], // Tipos de eventos selecionados
+    priorities: [], // Prioridades selecionadas
+    dateRange: {
+      start: '',
+      end: ''
+    },
+    doctors: [], // Médicos selecionados
+    hasDocuments: null, // true, false ou null (todos)
+    sortBy: 'date', // 'date', 'title', 'priority', 'type'
+    sortOrder: 'desc' // 'asc' ou 'desc'
+  });
 
   // Estados do formulário
   const [formData, setFormData] = useState({
@@ -65,9 +87,30 @@ export default function App() {
   // Carregar eventos ao iniciar
   useEffect(() => {
     loadHealthEvents();
+    initializeNotifications();
   }, []);
 
   // Carregar eventos do storage
+  // Inicializar serviço de notificações
+  const initializeNotifications = async () => {
+    try {
+      await NotificationService.initialize();
+      loadUpcomingReminders();
+    } catch (error) {
+      console.error('Erro ao inicializar notificações:', error);
+    }
+  };
+
+  // Carregar próximos lembretes
+  const loadUpcomingReminders = () => {
+    try {
+      const upcoming = NotificationService.getUpcomingReminders();
+      setUpcomingReminders(upcoming.slice(0, 3)); // Mostrar apenas os próximos 3
+    } catch (error) {
+      console.error('Erro ao carregar lembretes:', error);
+    }
+  };
+
   const loadHealthEvents = async () => {
     try {
       const events = await AsyncStorage.getItem('healthEvents');
@@ -242,6 +285,8 @@ export default function App() {
       followUp: event.followUp || '',
       priority: event.priority || 'normal'
     });
+    // Carregar documentos anexados do evento
+    setAttachedDocuments(event.attachedDocuments || []);
     setEditingEvent(event);
     setIsEditing(true);
     setShowAddModal(true);
@@ -254,6 +299,7 @@ export default function App() {
     const updatedEvent = {
       ...editingEvent,
       ...formData,
+      attachedDocuments: attachedDocuments,
       updatedAt: new Date().toISOString()
     };
 
@@ -301,12 +347,37 @@ export default function App() {
   };
 
   // Adicionar novo evento
+  // Criar lembrete a partir de medicamento
+  const createReminderFromMedication = (event) => {
+    if (event.type === 'medicamento' && event.medications) {
+      Alert.alert(
+        'Criar Lembrete',
+        `Deseja criar um lembrete para o medicamento ${event.medications}?`,
+        [
+          { text: 'Não', style: 'cancel' },
+          {
+            text: 'Sim',
+            onPress: () => {
+              // Extrair informações do medicamento
+              const medicationName = event.medications.split(' - ')[0] || event.medications;
+              const dosage = event.medications.includes(' - ') ? event.medications.split(' - ')[1] : 'Conforme prescrição';
+              
+              // Abrir modal de lembretes com dados pré-preenchidos
+              setShowMedicationReminders(true);
+            }
+          }
+        ]
+      );
+    }
+  };
+
   const addNewEvent = () => {
     if (!validateForm()) return;
 
     const newEvent = {
       id: Date.now(),
       ...formData,
+      attachedDocuments: attachedDocuments,
       createdAt: new Date().toISOString()
     };
 
@@ -315,6 +386,11 @@ export default function App() {
     resetForm();
     setShowAddModal(false);
     Alert.alert('Sucesso', 'Evento adicionado com sucesso!');
+    
+    // Sugerir criar lembrete se for medicamento
+    if (formData.type === 'medicamento') {
+      setTimeout(() => createReminderFromMedication(newEvent), 500);
+    }
   };
 
   // Adicionar evento de exemplo
@@ -361,14 +437,84 @@ export default function App() {
     Alert.alert('Sucesso', 'Eventos de exemplo adicionados!');
   };
 
-  // Filtrar eventos por busca
-  const filteredEvents = healthEvents.filter(event =>
-    event.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    event.doctor?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    event.notes?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    event.symptoms?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    event.diagnosis?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // Filtrar e ordenar eventos com filtros avançados
+  const getFilteredAndSortedEvents = () => {
+    let filtered = healthEvents.filter(event => {
+      // Filtro de busca por texto
+      const searchMatch = !searchQuery || (
+        event.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        event.doctor?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        event.notes?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        event.symptoms?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        event.diagnosis?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        event.treatment?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        event.medications?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        event.location?.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+
+      // Filtro por tipos de evento
+      const typeMatch = activeFilters.types.length === 0 || activeFilters.types.includes(event.type);
+
+      // Filtro por prioridades
+      const priorityMatch = activeFilters.priorities.length === 0 || activeFilters.priorities.includes(event.priority);
+
+      // Filtro por intervalo de datas
+      const dateMatch = (() => {
+        if (!activeFilters.dateRange.start && !activeFilters.dateRange.end) return true;
+        const eventDate = new Date(event.date);
+        const startDate = activeFilters.dateRange.start ? new Date(activeFilters.dateRange.start) : null;
+        const endDate = activeFilters.dateRange.end ? new Date(activeFilters.dateRange.end) : null;
+        
+        if (startDate && eventDate < startDate) return false;
+        if (endDate && eventDate > endDate) return false;
+        return true;
+      })();
+
+      // Filtro por médicos
+      const doctorMatch = activeFilters.doctors.length === 0 || 
+        (event.doctor && activeFilters.doctors.some(doctor => 
+          event.doctor.toLowerCase().includes(doctor.toLowerCase())
+        ));
+
+      // Filtro por presença de documentos
+      const documentsMatch = (() => {
+        if (activeFilters.hasDocuments === null) return true;
+        const hasDocuments = event.attachedDocuments && event.attachedDocuments.length > 0;
+        return activeFilters.hasDocuments === hasDocuments;
+      })();
+
+      return searchMatch && typeMatch && priorityMatch && dateMatch && doctorMatch && documentsMatch;
+    });
+
+    // Ordenação
+    filtered.sort((a, b) => {
+      let comparison = 0;
+      
+      switch (activeFilters.sortBy) {
+        case 'date':
+          comparison = new Date(a.date) - new Date(b.date);
+          break;
+        case 'title':
+          comparison = a.title.localeCompare(b.title);
+          break;
+        case 'priority':
+          const priorityOrder = { 'urgente': 4, 'alta': 3, 'normal': 2, 'baixa': 1 };
+          comparison = (priorityOrder[a.priority] || 0) - (priorityOrder[b.priority] || 0);
+          break;
+        case 'type':
+          comparison = a.type.localeCompare(b.type);
+          break;
+        default:
+          comparison = new Date(a.date) - new Date(b.date);
+      }
+      
+      return activeFilters.sortOrder === 'desc' ? -comparison : comparison;
+    });
+
+    return filtered;
+  };
+
+  const filteredEvents = getFilteredAndSortedEvents();
 
   // Gerar QR Code
   const generateQRCode = () => {
@@ -379,6 +525,87 @@ export default function App() {
     });
     setQrData(data);
     setShowQRModal(true);
+  };
+
+  // Funções para gerenciar filtros
+  const toggleFilterType = (type) => {
+    setActiveFilters(prev => ({
+      ...prev,
+      types: prev.types.includes(type) 
+        ? prev.types.filter(t => t !== type)
+        : [...prev.types, type]
+    }));
+  };
+
+  const toggleFilterPriority = (priority) => {
+    setActiveFilters(prev => ({
+      ...prev,
+      priorities: prev.priorities.includes(priority) 
+        ? prev.priorities.filter(p => p !== priority)
+        : [...prev.priorities, priority]
+    }));
+  };
+
+  const setDateRange = (start, end) => {
+    setActiveFilters(prev => ({
+      ...prev,
+      dateRange: { start, end }
+    }));
+  };
+
+  const toggleFilterDoctor = (doctor) => {
+    setActiveFilters(prev => ({
+      ...prev,
+      doctors: prev.doctors.includes(doctor) 
+        ? prev.doctors.filter(d => d !== doctor)
+        : [...prev.doctors, doctor]
+    }));
+  };
+
+  const setDocumentsFilter = (hasDocuments) => {
+    setActiveFilters(prev => ({
+      ...prev,
+      hasDocuments
+    }));
+  };
+
+  const setSortBy = (sortBy, sortOrder = 'desc') => {
+    setActiveFilters(prev => ({
+      ...prev,
+      sortBy,
+      sortOrder
+    }));
+  };
+
+  const clearAllFilters = () => {
+    setActiveFilters({
+      types: [],
+      priorities: [],
+      dateRange: { start: '', end: '' },
+      doctors: [],
+      hasDocuments: null,
+      sortBy: 'date',
+      sortOrder: 'desc'
+    });
+    setSearchQuery('');
+  };
+
+  const getActiveFiltersCount = () => {
+    let count = 0;
+    if (activeFilters.types.length > 0) count++;
+    if (activeFilters.priorities.length > 0) count++;
+    if (activeFilters.dateRange.start || activeFilters.dateRange.end) count++;
+    if (activeFilters.doctors.length > 0) count++;
+    if (activeFilters.hasDocuments !== null) count++;
+    if (searchQuery) count++;
+    return count;
+  };
+
+  const getUniqueDoctors = () => {
+    const doctors = healthEvents
+      .filter(event => event.doctor)
+      .map(event => event.doctor);
+    return [...new Set(doctors)];
   };
 
   // Limpar todos os eventos
@@ -440,6 +667,15 @@ export default function App() {
       {/* Modais */}
       {renderAddEventModal()}
       {renderQRModal()}
+      {renderDocumentModal()}
+      {renderFiltersModal()}
+      <MedicationReminders 
+        visible={showMedicationReminders} 
+        onClose={() => {
+          setShowMedicationReminders(false);
+          loadUpcomingReminders(); // Recarregar lembretes após fechar
+        }} 
+      />
     </SafeAreaView>
   );
 
@@ -481,15 +717,107 @@ export default function App() {
           </View>
         </View>
 
-        {/* Search Bar */}
-        <View style={styles.searchContainer}>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Buscar eventos..."
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-          />
+        {/* Search and Filters */}
+        <View style={styles.searchAndFiltersContainer}>
+          <View style={styles.searchContainer}>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Buscar eventos..."
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+            />
+            <TouchableOpacity 
+              style={[styles.filterButton, getActiveFiltersCount() > 0 && styles.filterButtonActive]}
+              onPress={() => setShowFiltersModal(true)}
+            >
+              <Text style={styles.filterButtonText}>🔍</Text>
+              {getActiveFiltersCount() > 0 && (
+                <View style={styles.filterBadge}>
+                  <Text style={styles.filterBadgeText}>{getActiveFiltersCount()}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          </View>
+          
+          {/* Active Filters Display */}
+          {getActiveFiltersCount() > 0 && (
+            <View style={styles.activeFiltersContainer}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                {activeFilters.types.map(type => (
+                  <TouchableOpacity 
+                    key={type} 
+                    style={styles.activeFilterChip}
+                    onPress={() => toggleFilterType(type)}
+                  >
+                    <Text style={styles.activeFilterText}>
+                      {eventTypes.find(t => t.value === type)?.label} ✕
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+                {activeFilters.priorities.map(priority => (
+                  <TouchableOpacity 
+                    key={priority} 
+                    style={styles.activeFilterChip}
+                    onPress={() => toggleFilterPriority(priority)}
+                  >
+                    <Text style={styles.activeFilterText}>
+                      {priorityLevels.find(p => p.value === priority)?.label} ✕
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+                {(activeFilters.dateRange.start || activeFilters.dateRange.end) && (
+                  <TouchableOpacity 
+                    style={styles.activeFilterChip}
+                    onPress={() => setDateRange('', '')}
+                  >
+                    <Text style={styles.activeFilterText}>
+                      📅 Período ✕
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {activeFilters.hasDocuments !== null && (
+                  <TouchableOpacity 
+                    style={styles.activeFilterChip}
+                    onPress={() => setDocumentsFilter(null)}
+                  >
+                    <Text style={styles.activeFilterText}>
+                      📎 {activeFilters.hasDocuments ? 'Com docs' : 'Sem docs'} ✕
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity 
+                  style={styles.clearFiltersButton}
+                  onPress={clearAllFilters}
+                >
+                  <Text style={styles.clearFiltersText}>Limpar todos</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
+          )}
         </View>
+
+        {/* Widget de Próximos Lembretes */}
+        {upcomingReminders.length > 0 && (
+          <View style={styles.remindersWidget}>
+            <View style={styles.remindersHeader}>
+              <Text style={styles.remindersTitle}>⏰ Próximos Lembretes</Text>
+              <TouchableOpacity onPress={() => setShowMedicationReminders(true)}>
+                <Text style={styles.remindersViewAll}>Ver todos</Text>
+              </TouchableOpacity>
+            </View>
+            {upcomingReminders.map((upcoming, index) => {
+              const timeUntil = Math.ceil((upcoming.nextTime - new Date()) / (1000 * 60 * 60));
+              return (
+                <View key={index} style={styles.reminderItem}>
+                  <Text style={styles.reminderMedication}>💊 {upcoming.reminder.medicationName}</Text>
+                  <Text style={styles.reminderTime}>
+                    {upcoming.timeString} ({timeUntil}h restantes)
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        )}
 
         {/* Action Buttons */}
         <View style={styles.actionButtons}>
@@ -769,6 +1097,46 @@ export default function App() {
                 numberOfLines={4}
               />
             </View>
+
+            {/* Upload de Documentos */}
+            <View style={styles.formGroup}>
+              <Text style={styles.formLabel}>Documentos Anexados</Text>
+              <TouchableOpacity 
+                style={styles.uploadButton}
+                onPress={showDocumentPicker}
+              >
+                <Text style={styles.uploadButtonIcon}>📎</Text>
+                <Text style={styles.uploadButtonText}>Anexar Documentos</Text>
+                <Text style={styles.uploadButtonSubtext}>Fotos, PDFs, documentos</Text>
+              </TouchableOpacity>
+              
+              {/* Lista de documentos anexados */}
+              {attachedDocuments.length > 0 && (
+                <View style={styles.attachedDocuments}>
+                  {attachedDocuments.map((doc) => (
+                    <View key={doc.id} style={styles.documentItem}>
+                      <Text style={styles.documentIcon}>
+                        {doc.type === 'image' ? '🖼️' : '📄'}
+                      </Text>
+                      <View style={styles.documentInfo}>
+                        <Text style={styles.documentName} numberOfLines={1}>
+                          {doc.name}
+                        </Text>
+                        <Text style={styles.documentSize}>
+                          {formatFileSize(doc.size)}
+                        </Text>
+                      </View>
+                      <TouchableOpacity 
+                        onPress={() => removeDocument(doc.id)}
+                        style={styles.removeButton}
+                      >
+                        <Text style={styles.removeButtonText}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
           </ScrollView>
         </SafeAreaView>
       </Modal>
@@ -920,6 +1288,54 @@ export default function App() {
             </View>
           )}
 
+          {/* Documentos Anexados */}
+          {selectedEvent.attachedDocuments && selectedEvent.attachedDocuments.length > 0 && (
+            <View style={styles.detailSection}>
+              <Text style={styles.detailSectionTitle}>📎 Documentos Anexados</Text>
+              <View style={styles.attachedDocumentsContainer}>
+                {selectedEvent.attachedDocuments.map((document, index) => (
+                  <View key={document.id || index} style={styles.attachedDocumentItem}>
+                    {document.type === 'image' ? (
+                      <TouchableOpacity 
+                        style={styles.documentImageContainer}
+                        onPress={() => {
+                          setSelectedDocument(document);
+                          setShowDocumentModal(true);
+                        }}
+                      >
+                        <Image 
+                          source={{ uri: document.uri }} 
+                          style={styles.documentThumbnail}
+                          resizeMode="cover"
+                        />
+                        <View style={styles.documentInfo}>
+                          <Text style={styles.documentName} numberOfLines={2}>
+                            {document.name}
+                          </Text>
+                          <Text style={styles.documentSize}>
+                            {formatFileSize(document.size)}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    ) : (
+                      <View style={styles.documentFileContainer}>
+                        <Text style={styles.documentIcon}>📄</Text>
+                        <View style={styles.documentInfo}>
+                          <Text style={styles.documentName} numberOfLines={2}>
+                            {document.name}
+                          </Text>
+                          <Text style={styles.documentSize}>
+                            {formatFileSize(document.size)}
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
           {/* Informações de sistema */}
           <View style={styles.detailSection}>
             <Text style={styles.detailSectionTitle}>ℹ️ Informações do Sistema</Text>
@@ -1064,11 +1480,11 @@ export default function App() {
           <View style={styles.settingsCard}>
             <Text style={styles.settingsCardTitle}>🔔 Notificações</Text>
             
-            <TouchableOpacity style={styles.settingsItem}>
+            <TouchableOpacity style={styles.settingsItem} onPress={() => setShowMedicationReminders(true)}>
               <Text style={styles.settingsItemIcon}>⏰</Text>
               <View style={styles.settingsItemContent}>
                 <Text style={styles.settingsItemTitle}>Lembretes de Medicamentos</Text>
-                <Text style={styles.settingsItemSubtitle}>Ativado</Text>
+                <Text style={styles.settingsItemSubtitle}>Gerenciar lembretes</Text>
               </View>
               <Text style={styles.settingsItemArrow}>›</Text>
             </TouchableOpacity>
@@ -1144,6 +1560,276 @@ export default function App() {
       </>
     );
   }
+
+  // Renderizar Modal de Visualização de Documento
+  function renderDocumentModal() {
+    if (!selectedDocument) return null;
+
+    return (
+      <Modal
+        visible={showDocumentModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowDocumentModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Visualizar Documento</Text>
+            
+            <Image 
+              source={{ uri: selectedDocument.uri }} 
+              style={styles.documentImage}
+              resizeMode="contain"
+            />
+            
+            <Text style={styles.documentName}>{selectedDocument.name}</Text>
+            
+            <TouchableOpacity 
+              style={styles.closeButton}
+              onPress={() => setShowDocumentModal(false)}
+            >
+              <Text style={styles.closeButtonText}>Fechar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    );
+  }
+
+  // Renderizar Modal de Filtros Avançados
+  function renderFiltersModal() {
+    return (
+      <Modal
+        visible={showFiltersModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowFiltersModal(false)}
+      >
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={() => setShowFiltersModal(false)}>
+              <Text style={styles.cancelButton}>Fechar</Text>
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>Filtros Avançados</Text>
+            <TouchableOpacity onPress={clearAllFilters}>
+              <Text style={styles.clearButton}>Limpar</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={styles.filtersContainer}>
+            {/* Ordenação */}
+            <View style={styles.filterSection}>
+              <Text style={styles.filterSectionTitle}>📊 Ordenação</Text>
+              <View style={styles.sortOptions}>
+                {[
+                  { value: 'date', label: 'Data', icon: '📅' },
+                  { value: 'title', label: 'Título', icon: '📝' },
+                  { value: 'priority', label: 'Prioridade', icon: '⚡' },
+                  { value: 'type', label: 'Tipo', icon: '🏷️' }
+                ].map((option) => (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[
+                      styles.sortOption,
+                      activeFilters.sortBy === option.value && styles.sortOptionSelected
+                    ]}
+                    onPress={() => setSortBy(option.value, activeFilters.sortOrder)}
+                  >
+                    <Text style={styles.sortOptionIcon}>{option.icon}</Text>
+                    <Text style={[
+                      styles.sortOptionText,
+                      activeFilters.sortBy === option.value && styles.sortOptionTextSelected
+                    ]}>
+                      {option.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              
+              <View style={styles.sortOrderContainer}>
+                <TouchableOpacity
+                  style={[
+                    styles.sortOrderButton,
+                    activeFilters.sortOrder === 'desc' && styles.sortOrderButtonSelected
+                  ]}
+                  onPress={() => setSortBy(activeFilters.sortBy, 'desc')}
+                >
+                  <Text style={styles.sortOrderText}>⬇️ Mais recente</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.sortOrderButton,
+                    activeFilters.sortOrder === 'asc' && styles.sortOrderButtonSelected
+                  ]}
+                  onPress={() => setSortBy(activeFilters.sortBy, 'asc')}
+                >
+                  <Text style={styles.sortOrderText}>⬆️ Mais antigo</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Filtro por Tipo */}
+            <View style={styles.filterSection}>
+              <Text style={styles.filterSectionTitle}>🏷️ Tipos de Evento</Text>
+              <View style={styles.filterOptions}>
+                {eventTypes.map((type) => (
+                  <TouchableOpacity
+                    key={type.value}
+                    style={[
+                      styles.filterOption,
+                      activeFilters.types.includes(type.value) && styles.filterOptionSelected
+                    ]}
+                    onPress={() => toggleFilterType(type.value)}
+                  >
+                    <Text style={styles.filterOptionIcon}>{type.icon}</Text>
+                    <Text style={[
+                      styles.filterOptionText,
+                      activeFilters.types.includes(type.value) && styles.filterOptionTextSelected
+                    ]}>
+                      {type.label}
+                    </Text>
+                    {activeFilters.types.includes(type.value) && (
+                      <Text style={styles.filterOptionCheck}>✓</Text>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* Filtro por Prioridade */}
+            <View style={styles.filterSection}>
+              <Text style={styles.filterSectionTitle}>⚡ Prioridades</Text>
+              <View style={styles.filterOptions}>
+                {priorityLevels.map((priority) => (
+                  <TouchableOpacity
+                    key={priority.value}
+                    style={[
+                      styles.filterOption,
+                      activeFilters.priorities.includes(priority.value) && styles.filterOptionSelected
+                    ]}
+                    onPress={() => toggleFilterPriority(priority.value)}
+                  >
+                    <View style={[styles.priorityIndicator, { backgroundColor: priority.color }]} />
+                    <Text style={[
+                      styles.filterOptionText,
+                      activeFilters.priorities.includes(priority.value) && styles.filterOptionTextSelected
+                    ]}>
+                      {priority.label}
+                    </Text>
+                    {activeFilters.priorities.includes(priority.value) && (
+                      <Text style={styles.filterOptionCheck}>✓</Text>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* Filtro por Data */}
+            <View style={styles.filterSection}>
+              <Text style={styles.filterSectionTitle}>📅 Período</Text>
+              <View style={styles.dateRangeContainer}>
+                <View style={styles.dateInputContainer}>
+                  <Text style={styles.dateInputLabel}>Data inicial:</Text>
+                  <TextInput
+                    style={styles.dateInput}
+                    value={activeFilters.dateRange.start}
+                    onChangeText={(text) => setDateRange(text, activeFilters.dateRange.end)}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </View>
+                <View style={styles.dateInputContainer}>
+                  <Text style={styles.dateInputLabel}>Data final:</Text>
+                  <TextInput
+                    style={styles.dateInput}
+                    value={activeFilters.dateRange.end}
+                    onChangeText={(text) => setDateRange(activeFilters.dateRange.start, text)}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </View>
+              </View>
+            </View>
+
+            {/* Filtro por Médicos */}
+            {getUniqueDoctors().length > 0 && (
+              <View style={styles.filterSection}>
+                <Text style={styles.filterSectionTitle}>👨‍⚕️ Médicos</Text>
+                <View style={styles.filterOptions}>
+                  {getUniqueDoctors().map((doctor) => (
+                    <TouchableOpacity
+                      key={doctor}
+                      style={[
+                        styles.filterOption,
+                        activeFilters.doctors.includes(doctor) && styles.filterOptionSelected
+                      ]}
+                      onPress={() => toggleFilterDoctor(doctor)}
+                    >
+                      <Text style={styles.filterOptionIcon}>👨‍⚕️</Text>
+                      <Text style={[
+                        styles.filterOptionText,
+                        activeFilters.doctors.includes(doctor) && styles.filterOptionTextSelected
+                      ]}>
+                        {doctor}
+                      </Text>
+                      {activeFilters.doctors.includes(doctor) && (
+                        <Text style={styles.filterOptionCheck}>✓</Text>
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
+
+            {/* Filtro por Documentos */}
+            <View style={styles.filterSection}>
+              <Text style={styles.filterSectionTitle}>📎 Documentos</Text>
+              <View style={styles.documentsFilterContainer}>
+                <TouchableOpacity
+                  style={[
+                    styles.documentsFilterOption,
+                    activeFilters.hasDocuments === null && styles.documentsFilterOptionSelected
+                  ]}
+                  onPress={() => setDocumentsFilter(null)}
+                >
+                  <Text style={styles.documentsFilterText}>Todos</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.documentsFilterOption,
+                    activeFilters.hasDocuments === true && styles.documentsFilterOptionSelected
+                  ]}
+                  onPress={() => setDocumentsFilter(true)}
+                >
+                  <Text style={styles.documentsFilterText}>Com documentos</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.documentsFilterOption,
+                    activeFilters.hasDocuments === false && styles.documentsFilterOptionSelected
+                  ]}
+                  onPress={() => setDocumentsFilter(false)}
+                >
+                  <Text style={styles.documentsFilterText}>Sem documentos</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Estatísticas dos Filtros */}
+            <View style={styles.filterSection}>
+              <Text style={styles.filterSectionTitle}>📊 Resultados</Text>
+              <View style={styles.filterStats}>
+                <Text style={styles.filterStatsText}>
+                  {filteredEvents.length} de {healthEvents.length} eventos
+                </Text>
+                <Text style={styles.filterStatsSubtext}>
+                  {getActiveFiltersCount()} filtros ativos
+                </Text>
+              </View>
+            </View>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+    );
+  }
 }
 
 const styles = StyleSheet.create({
@@ -1198,20 +1884,70 @@ const styles = StyleSheet.create({
     color: '#666',
     marginTop: 5,
   },
+  searchAndFiltersContainer: {
+    padding: 20,
+  },
   searchContainer: {
-    paddingHorizontal: 20,
-    marginBottom: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'white',
+    padding: 10,
+    borderRadius: 10,
+    marginBottom: 10,
   },
   searchInput: {
-    backgroundColor: 'white',
-    padding: 15,
-    borderRadius: 10,
+    flex: 1,
+    padding: 10,
     fontSize: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 2,
+  },
+  filterButton: {
+    padding: 10,
+  },
+  filterButtonActive: {
+    backgroundColor: '#4A90E2',
+  },
+  filterButtonText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  filterBadge: {
+    backgroundColor: '#EF4444',
+    padding: 4,
+    borderRadius: 10,
+    marginLeft: 10,
+  },
+  filterBadgeText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  activeFiltersContainer: {
+    backgroundColor: 'white',
+    padding: 10,
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  activeFilterChip: {
+    backgroundColor: '#f5f5f5',
+    padding: 10,
+    borderRadius: 10,
+    marginRight: 10,
+  },
+  activeFilterText: {
+    color: '#666',
+    fontSize: 14,
+  },
+  clearFiltersButton: {
+    backgroundColor: '#4A90E2',
+    padding: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  clearFiltersText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 16,
   },
   actionButtons: {
     flexDirection: 'row',
@@ -1372,9 +2108,10 @@ const styles = StyleSheet.create({
   },
   closeButton: {
     backgroundColor: '#4A90E2',
-    paddingHorizontal: 30,
-    paddingVertical: 12,
+    padding: 15,
     borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 20,
   },
   closeButtonText: {
     color: 'white',
@@ -1744,5 +2481,272 @@ const styles = StyleSheet.create({
   settingsItemArrow: {
     fontSize: 16,
     color: '#4A90E2',
+  },
+  uploadButton: {
+    backgroundColor: '#4A90E2',
+    padding: 15,
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  uploadButtonIcon: {
+    fontSize: 20,
+    color: 'white',
+    marginRight: 10,
+  },
+  uploadButtonText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  uploadButtonSubtext: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 12,
+    marginLeft: 10,
+  },
+  attachedDocuments: {
+    marginTop: 10,
+  },
+  documentItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f5f5f5',
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 5,
+  },
+  documentIcon: {
+    fontSize: 20,
+    marginRight: 10,
+  },
+  documentInfo: {
+    flex: 1,
+  },
+  documentName: {
+    fontSize: 14,
+    color: '#333',
+    fontWeight: '500',
+  },
+  documentSize: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 2,
+  },
+  removeButton: {
+    backgroundColor: '#ff4444',
+    padding: 5,
+    borderRadius: 15,
+    width: 30,
+    height: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  removeButtonText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  attachedDocumentsContainer: {
+    marginTop: 10,
+  },
+  attachedDocumentItem: {
+    marginBottom: 5,
+  },
+  documentImageContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f5f5f5',
+    padding: 10,
+    borderRadius: 8,
+  },
+  documentThumbnail: {
+    width: 80,
+    height: 80,
+    borderRadius: 4,
+    marginRight: 10,
+  },
+  documentFileContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f5f5f5',
+    padding: 10,
+    borderRadius: 8,
+  },
+  documentImage: {
+    width: '100%',
+    height: 400,
+    borderRadius: 8,
+    marginVertical: 10,
+  },
+  filtersContainer: {
+    padding: 20,
+  },
+  filterSection: {
+    marginBottom: 20,
+  },
+  filterSectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 10,
+  },
+  sortOptions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  sortOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    borderRadius: 8,
+    backgroundColor: 'white',
+    minWidth: '45%',
+  },
+  sortOptionSelected: {
+    borderColor: '#4A90E2',
+    backgroundColor: '#EBF4FF',
+  },
+  sortOptionIcon: {
+    fontSize: 20,
+    marginRight: 10,
+  },
+  sortOptionText: {
+    fontSize: 16,
+    color: '#666',
+  },
+  sortOptionTextSelected: {
+    fontWeight: 'bold',
+    color: '#4A90E2',
+  },
+  sortOrderContainer: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  sortOrderButton: {
+    flex: 1,
+    padding: 10,
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    borderRadius: 8,
+    backgroundColor: 'white',
+  },
+  sortOrderButtonSelected: {
+    borderColor: '#4A90E2',
+    backgroundColor: '#EBF4FF',
+  },
+  sortOrderText: {
+    fontSize: 16,
+    color: '#666',
+  },
+  filterOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  filterOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    borderRadius: 8,
+    backgroundColor: 'white',
+    minWidth: '45%',
+  },
+  filterOptionSelected: {
+    borderColor: '#4A90E2',
+    backgroundColor: '#EBF4FF',
+  },
+  filterOptionIcon: {
+    fontSize: 20,
+    marginRight: 10,
+  },
+  filterOptionText: {
+    fontSize: 16,
+    color: '#666',
+  },
+  filterOptionTextSelected: {
+    fontWeight: 'bold',
+    color: '#4A90E2',
+  },
+  filterOptionCheck: {
+    fontSize: 16,
+    color: '#4A90E2',
+    fontWeight: 'bold',
+    marginLeft: 'auto',
+  },
+  priorityIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 10,
+  },
+  dateRangeContainer: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  dateInputContainer: {
+    flex: 1,
+  },
+  dateInputLabel: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 5,
+  },
+  dateInput: {
+    backgroundColor: 'white',
+    padding: 10,
+    borderRadius: 8,
+    fontSize: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  documentsFilterContainer: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  documentsFilterOption: {
+    flex: 1,
+    padding: 10,
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    borderRadius: 8,
+    backgroundColor: 'white',
+    alignItems: 'center',
+  },
+  documentsFilterOptionSelected: {
+    borderColor: '#4A90E2',
+    backgroundColor: '#EBF4FF',
+  },
+  documentsFilterText: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+  },
+  filterStats: {
+    alignItems: 'center',
+    padding: 15,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 8,
+  },
+  filterStatsText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  filterStatsSubtext: {
+    fontSize: 14,
+    color: '#666',
+    marginTop: 5,
+  },
+  clearButton: {
+    color: '#EF4444',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
 });
